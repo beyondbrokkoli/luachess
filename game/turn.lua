@@ -143,7 +143,7 @@ function Turn:new(pos,turn,freshmap,eptoken,change,drawCount)
 			new,alg = normal(pos,l,s)
 		end
 		alg = clearly(self.possible,l,s,alg)
-		print("alg")
+		print(alg)
 		-- new turn data
 		if abs(new[s]) == 1 and abs(l.y-s.y)==2 then
 			eptoken = loc:new( s.x, s.y-pc.id ) -- subtract pushed pawn
