@@ -288,6 +288,53 @@ function possible(pos,turn,freshmap,eptoken)
             p[l].moves = filterPin(p[l].moves,pin)
         end
     end)
+
+    -- EP PROOF PASS: an en-passant capture vacates TWO squares of one
+    -- rank (the capturer leaves, the captured pawn vanishes) — a
+    -- discovery the single-piece pin filter cannot see: with the
+    -- captured pawn between capturer and king the pin scan sees no
+    -- line, and with the king adjacent the away-scan hits the captured
+    -- pawn (not a slider) and sees no pin either. Every ep capture is
+    -- proven by playing it out — only a king-safe one survives.
+    -- (pos3's f4xe3/f4xg3 next to the b4 rook, king on h4, generated
+    -- both bogus captures — perft +2 at d2, and at d4 the leaked
+    -- check even let a rook capture the king, crashing findKing.)
+    scrollTurn(pos,turn,function(s,l)
+        if abs(s) == 1 and p[l].moves then
+            local keep = get_list()
+            local n = 1
+            local i = 1
+            while p[l].moves[i] do
+                local m = p[l].moves[i]
+                if m.enpas then
+                    -- Simulate the capture: remove capturer + captured pawn
+                    local proof = Map:copy(pos)
+                    proof[l] = 0
+                    proof[loc:new(m.x, l.y)] = 0
+                    local kp = findKing(proof,turn)
+                    local safe = true
+                    local atk = attackgen(proof,turn+1)
+                    local j = 1
+                    while atk[j] do
+                        if atk[j] == kp then
+                            safe = false
+                            break
+                        end
+                        j = j + 1
+                    end
+                    if safe then
+                        keep[n] = m
+                        n = n + 1
+                    end
+                else
+                    keep[n] = m
+                    n = n + 1
+                end
+                i = i + 1
+            end
+            p[l].moves = keep
+        end
+    end)
     return p
 end
 
