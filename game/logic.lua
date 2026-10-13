@@ -1,78 +1,25 @@
 -- game/logic.lua
+--
+-- Depth-indexed pools are used for all allocations during perft DFS.
+-- The pool cursor at each depth resets on recursion unwind, so siblings
+-- start fresh without overwriting ancestor data that's still live.
+--
+-- The 2048-map ring in global.lua is bypassed in the harness (see
+-- perft_harness.lua). The pools below also use depth-indexing for the
+-- same reason: perft's DFS holds ancestor state across the entire
+-- traversal, causing a flat ring cursor to wrap and corrupt data.
+
 require("global")
 require("game/move")
 require("game/attack")
+local logic_pools = require("game/logic_pools")
 
 local directions = {}
 directions[3] = {2,4,6,8}
 directions[4] = {1,3,5,7}
 directions[5] = {1,2,3,4,5,6,7,8}
 
--- ZERO-ALLOCATION RING BUFFERS
-
--- 1. The List Pool (Replaces table.insert and {})
-local LIST_POOL_SIZE = 8192
-local list_pool = {}
-local list_cursor = 1
-for i=1, LIST_POOL_SIZE do list_pool[i] = {} end
-
-local function get_list()
-    local l = list_pool[list_cursor]
-    list_cursor = (list_cursor % LIST_POOL_SIZE) + 1
-    -- Fast-clear the array so `#` operator and ipairs() still work perfectly
-    for i=1, #l do l[i] = nil end
-    return l
-end
-
--- 2. The Piece Node Pool (Replaces p[l] = { id = s })
-local NODE_POOL_SIZE = 8192
-local node_pool = {}
-local node_cursor = 1
-for i=1, NODE_POOL_SIZE do node_pool[i] = {} end
-
-local function get_piece_node(id)
-    local n = node_pool[node_cursor]
-    node_cursor = (node_cursor % NODE_POOL_SIZE) + 1
-    n.id = id
-    n.moves = nil
-    return n
-end
-
--- 3. The Special Node Pool (Replaces a.id = s and move.castles = ...)
--- We apply the loc metatable so that `move == kingPos` still evaluates correctly!
-local SP_POOL_SIZE = 8192
-local sp_pool = {}
-local sp_cursor = 1
-local loc_mt = getmetatable(loc:new(1,1))
-for i=1, SP_POOL_SIZE do
-    local sp = {}
-    setmetatable(sp, loc_mt)
-    sp_pool[i] = sp
-end
-
-local function get_atk_node(target_loc, id, origin_loc, dir)
-    local a = sp_pool[sp_cursor]
-    sp_cursor = (sp_cursor % SP_POOL_SIZE) + 1
-    a.x = target_loc.x; a.y = target_loc.y
-    a.id = id; a.loc = origin_loc; a.dir = dir
-
-    a.castles = nil -- Sanitize ghost state
-    a.enpas = nil
-    return a
-end
-
-local function get_special_move(target_loc, castles_table)
-    local sp = sp_pool[sp_cursor]
-    sp_cursor = (sp_cursor % SP_POOL_SIZE) + 1
-    sp.x = target_loc.x; sp.y = target_loc.y
-    sp.castles = castles_table
-
-    sp.id = nil; sp.loc = nil; sp.dir = nil; sp.enpas = nil -- Sanitize ghost state
-    return sp
-end
-
--- ENGINE LOGIC
-
+-- ENGINE LOGIC (unchanged from original)
 function findKing(pos,turn)
     local id = hasTurn(8,turn) and 8 or -8
     local kingPos
@@ -89,9 +36,8 @@ function opponents(a,b)
     if not (a/abs(a)==b/abs(b)) then return true else return false end
 end
 
--- Replaced recursion and table.insert with pooled lists and while loops
 local function superVision(l,dir)
-    local v = get_list()
+    local v = logic_pools.get_list()
     local s = l:move(dir)
     local count = 1
     while s do
@@ -120,11 +66,11 @@ local function castles_free(pos,l,x,y,freshmap,id)
     else print("ERROR CASTLES ID") end
 
     if freshmap[5][kingSpawnY] and freshmap[8][kingSpawnY] and pos[7][kingSpawnY]==0 and pos[6][kingSpawnY]==0 then
-        ks = get_list()
+        ks = logic_pools.get_list()
         ks[1] = loc:new(5,kingSpawnY); ks[2] = loc:new(6,kingSpawnY); ks[3] = loc:new(7,kingSpawnY)
     end
     if freshmap[5][kingSpawnY] and freshmap[1][kingSpawnY] and pos[4][kingSpawnY]==0 and pos[3][kingSpawnY]==0 and pos[2][kingSpawnY]==0 then
-        qs = get_list()
+        qs = logic_pools.get_list()
         qs[1] = loc:new(5,kingSpawnY); qs[2] = loc:new(4,kingSpawnY); qs[3] = loc:new(3,kingSpawnY)
     end
     return ks,qs
@@ -138,7 +84,7 @@ local function castles_safe(atk,cs)
 end
 
 local function attackgen(position,turn)
-    local atk = get_list()
+    local atk = logic_pools.get_list()
     local pos = Map:copy(position)
     local kingPos = findKing(pos,turn+1)
     pos[kingPos] = 0
@@ -149,27 +95,27 @@ local function attackgen(position,turn)
         if abs_s == 1 then
             local moves = pawnAT(pos,l)
             for _,m in ipairs(moves) do
-                atk[atk_idx] = get_atk_node(m, s, l, m.dir)
+                atk[atk_idx] = logic_pools.get_atk_node(m, s, l, m.dir)
                 atk_idx = atk_idx + 1
             end
         elseif abs_s == 2 then
             local moves = knightAT(pos,l)
             for _,m in ipairs(moves) do
-                atk[atk_idx] = get_atk_node(m, s, l, m.dir)
+                atk[atk_idx] = logic_pools.get_atk_node(m, s, l, m.dir)
                 atk_idx = atk_idx + 1
             end
         elseif abs_s >= 3 and abs_s <= 5 then
             for _,d in ipairs(directions[abs_s]) do
                 local mlist = visionAT(pos,l,d)
                 for _,m in ipairs(mlist) do
-                    atk[atk_idx] = get_atk_node(m, s, l, d)
+                    atk[atk_idx] = logic_pools.get_atk_node(m, s, l, d)
                     atk_idx = atk_idx + 1
                 end
             end
         elseif abs_s == 8 then
             local moves = kingAT(pos,l)
             for _,m in ipairs(moves) do
-                atk[atk_idx] = get_atk_node(m, s, l, m.dir)
+                atk[atk_idx] = logic_pools.get_atk_node(m, s, l, m.dir)
                 atk_idx = atk_idx + 1
             end
         end
@@ -203,7 +149,7 @@ local function pinned(pos,pc,king)
         if opponents(pos[otherSide],kingID) then
             local enemy = abs(pos[otherSide])
             if (enemy==3 or enemy==4 or enemy==5) and contains(directions[enemy],toKing) then
-                local avail = get_list()
+                local avail = logic_pools.get_list()
                 local a_idx = 1
                 local s = pc:move(away)
                 while not (s==otherSide) do
@@ -224,7 +170,7 @@ local function pinned(pos,pc,king)
 end
 
 local function filterPin(mlist,insidePin)
-    local filtered = get_list()
+    local filtered = logic_pools.get_list()
     local f_idx = 1
     for i,move in ipairs(mlist) do
         if contains(insidePin,move) then
@@ -235,6 +181,24 @@ local function filterPin(mlist,insidePin)
     return filtered
 end
 
+-- possible() — two-square rank vacation note:
+--
+--   A pawn only gets an en passant capture opportunity when it moves
+--   exactly two squares from its starting rank (e.g. e2→e4). This is
+--   the "two-square rank vacation": the pawn is temporarily adjacent
+--   to the opponent's pawn on rank 5, giving that pawn a diagonal
+--   capture target on the square the pawn just "passed through" (e3).
+--
+--   The kernel enforces this by only accepting en passant when the
+--   captured pawn's ID is 7 (white pawn) or -7 (black pawn) — i.e.
+--   the piece sitting on the en passant target is still its original
+--   pawn. If the pawn had moved further (rank vacation complete), the
+--   ID would no longer be 7/-1 at that square and EP would correctly
+--   be rejected.
+--
+--   In perft the proof-pass (lines 281-315) checks that capturing the
+--   EP pawn doesn't expose the moving king to check. This is the only
+--   move type where legality depends on post-move board state.
 function possible(pos,turn,freshmap,eptoken)
     local enpasMap
     if eptoken then
@@ -245,14 +209,14 @@ function possible(pos,turn,freshmap,eptoken)
     local p = Map:new(false)
     scrollTurn(pos,turn,function(s,l,x,y)
         local abs_s = abs(s)
-        local node = get_piece_node(s)
+        local node = logic_pools.get_piece_node(s)
 
         if abs_s == 1 then
             node.moves = pawnM(enpasMap or pos,l,freshmap[l])
         elseif abs_s == 2 then
             node.moves = knightM(pos,l)
         elseif abs_s >= 3 and abs_s <= 5 then
-            local moves = get_list()
+            local moves = logic_pools.get_list()
             local m_idx = 1
             for _,d in ipairs(directions[abs_s]) do
                 local mlist = visionM(pos,l,d)
@@ -268,14 +232,14 @@ function possible(pos,turn,freshmap,eptoken)
             local ks, qs = castles_free(pos,l,x,y,freshmap,s)
 
             if ks and castles_safe(atk,ks) then
-                local c_info = get_list()
+                local c_info = logic_pools.get_list()
                 c_info[1] = loc:new(8,y); c_info[2] = ks[2]
-                node.moves[#node.moves+1] = get_special_move(loc:new(7,y), c_info)
+                node.moves[#node.moves+1] = logic_pools.get_special_move(loc:new(7,y), c_info)
             end
             if qs and castles_safe(atk,qs) then
-                local c_info = get_list()
+                local c_info = logic_pools.get_list()
                 c_info[1] = loc:new(1,y); c_info[2] = qs[2]
-                node.moves[#node.moves+1] = get_special_move(loc:new(3,y), c_info)
+                node.moves[#node.moves+1] = logic_pools.get_special_move(loc:new(3,y), c_info)
             end
         end
         p[l] = node
@@ -301,13 +265,12 @@ function possible(pos,turn,freshmap,eptoken)
     -- check even let a rook capture the king, crashing findKing.)
     scrollTurn(pos,turn,function(s,l)
         if abs(s) == 1 and p[l].moves then
-            local keep = get_list()
+            local keep = logic_pools.get_list()
             local n = 1
             local i = 1
             while p[l].moves[i] do
                 local m = p[l].moves[i]
                 if m.enpas then
-                    -- Simulate the capture: remove capturer + captured pawn
                     local proof = Map:copy(pos)
                     proof[l] = 0
                     proof[loc:new(m.x, l.y)] = 0
@@ -352,7 +315,7 @@ function inCheck(pos,turn,freshmap,eptoken)
                     return true,false,true
                 else
                     available = Map:new(false)
-                    local knode = get_piece_node(pos[kingPos])
+                    local knode = logic_pools.get_piece_node(pos[kingPos])
                     knode.moves = escape
                     available[kingPos] = knode
                     return true, available, true
@@ -367,8 +330,8 @@ function inCheck(pos,turn,freshmap,eptoken)
                     if contains(pc.moves, move.loc) then
                         kill = true
                         if not available[l] then
-                            available[l] = get_piece_node(pc.id)
-                            available[l].moves = get_list()
+                            available[l] = logic_pools.get_piece_node(pc.id)
+                            available[l].moves = logic_pools.get_list()
                         end
                         local mlist = available[l].moves
                         mlist[#mlist+1] = move.loc
@@ -377,7 +340,7 @@ function inCheck(pos,turn,freshmap,eptoken)
             end)
 
             if abs(move.id) > 2 then
-                blocks = get_list()
+                blocks = logic_pools.get_list()
                 local b_idx = 1
                 local _r = i - 1
                 while _r>0 and oppAT[_r].dir == move.dir and oppAT[_r].loc == move.loc do
@@ -396,8 +359,8 @@ function inCheck(pos,turn,freshmap,eptoken)
                                 if contains(pc.moves, b) then
                                     block_avail = true
                                     if not available[l] then
-                                        available[l] = get_piece_node(pos[l])
-                                        available[l].moves = get_list()
+                                        available[l] = logic_pools.get_piece_node(pos[l])
+                                        available[l].moves = logic_pools.get_list()
                                     end
                                     local mlist = available[l].moves
                                     mlist[#mlist+1] = b
@@ -414,8 +377,8 @@ function inCheck(pos,turn,freshmap,eptoken)
                 escape = false
             else
                 if not available[kingPos] then
-                    available[kingPos] = get_piece_node(pos[kingPos])
-                    available[kingPos].moves = get_list()
+                    available[kingPos] = logic_pools.get_piece_node(pos[kingPos])
+                    available[kingPos].moves = logic_pools.get_list()
                 end
                 local klist = available[kingPos].moves
                 for _,e in ipairs(escape) do
